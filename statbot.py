@@ -19,61 +19,36 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!s', intents=intents, help_command=None)
 
 # ========================================
-# ROLLER VE SÜRELERİ (Saniye cinsinden)
+# ROLLER VE SÜRELERİ
 # ========================================
 
 ROLLER = [
-    {"id": 1541443222147178496, "sure": 25 * 60 * 60, "isim": "Margarita Negra 🖤"},      # 25 saat
-    {"id": 1541443492914528337, "sure": 15 * 60 * 60, "isim": "f l o r d e s a n g r e🩸"}, # 15 saat
-    {"id": 1541443535365083196, "sure": 8 * 60 * 60, "isim": "E l I n f i e r n o🕯️"},    # 8 saat
-    {"id": 1541443660980158514, "sure": 2 * 60 * 60, "isim": "S o l a d o 🌿"},            # 2 saat
-    {"id": 1541443983882981536, "sure": 45 * 60, "isim": "p a p a t y a 🌸"},              # 45 dakika
-    {"id": 1541444135146364928, "sure": 15 * 60, "isim": "yol kenarı otu 🌾"}             # 15 dakika
+    {"id": 1541443222147178496, "sure": 25 * 60 * 60, "isim": "Margarita Negra 🖤"},
+    {"id": 1541443492914528337, "sure": 15 * 60 * 60, "isim": "f l o r d e s a n g r e🩸"},
+    {"id": 1541443535365083196, "sure": 8 * 60 * 60, "isim": "E l I n f i e r n o🕯️"},
+    {"id": 1541443660980158514, "sure": 2 * 60 * 60, "isim": "S o l a d o 🌿"},
+    {"id": 1541443983882981536, "sure": 45 * 60, "isim": "p a p a t y a 🌸"},
+    {"id": 1541444135146364928, "sure": 15 * 60, "isim": "yol kenarı otu 🌾"}
 ]
-
-# ========================================
-# VERİTABANI
-# ========================================
 
 DB_NAME = "kullanici_verileri.db"
 
 def veritabani_kur():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ses_sureleri (
-            user_id INTEGER PRIMARY KEY,
-            toplam_saniye INTEGER DEFAULT 0
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS mesaj_sayilari (
-            user_id INTEGER PRIMARY KEY,
-            toplam_mesaj INTEGER DEFAULT 0
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS verilen_roller (
-            user_id INTEGER,
-            rol_id INTEGER,
-            PRIMARY KEY (user_id, rol_id)
-        )
-    ''')
+    cursor.execute('CREATE TABLE IF NOT EXISTS ses_sureleri (user_id INTEGER PRIMARY KEY, toplam_saniye INTEGER DEFAULT 0)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS mesaj_sayilari (user_id INTEGER PRIMARY KEY, toplam_mesaj INTEGER DEFAULT 0)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS verilen_roller (user_id INTEGER, rol_id INTEGER, PRIMARY KEY (user_id, rol_id))')
     conn.commit()
     conn.close()
 
 veritabani_kur()
-
 aktif_sesler = {}
-
-# ========================================
-# OLAYLAR
-# ========================================
 
 @bot.event
 async def on_ready():
     await bot.change_presence(activity=discord.Game(name="!syardım"))
-    print(f'✅ Bot hazır: {bot.user}')
+    print(f'✅ Stat Bot hazır: {bot.user}')
     print(f'🎯 {len(ROLLER)} adet rol takip ediliyor.')
 
 @bot.event
@@ -90,19 +65,13 @@ async def on_message(message):
 @bot.event
 async def on_voice_state_update(member, before, after):
     now = datetime.now()
-    
-    # Sese girdi
     if before.channel is None and after.channel is not None:
         aktif_sesler[member.id] = now
-    
-    # Sesten çıktı
     elif before.channel is not None and after.channel is None:
         if member.id in aktif_sesler:
             giris = aktif_sesler.pop(member.id)
             fark = (now - giris).seconds
             await ses_ekle(member, fark)
-    
-    # Kanal değiştirdi
     elif before.channel != after.channel:
         if member.id in aktif_sesler:
             giris = aktif_sesler.pop(member.id)
@@ -112,34 +81,22 @@ async def on_voice_state_update(member, before, after):
             aktif_sesler[member.id] = now
 
 async def ses_ekle(member, eklenecek_saniye):
-    """Ses süresini ekler ve rolleri kontrol eder."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
-    # Süreyi güncelle
     cursor.execute("INSERT INTO ses_sureleri (user_id, toplam_saniye) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET toplam_saniye = toplam_saniye + ?", (member.id, eklenecek_saniye, eklenecek_saniye))
     conn.commit()
-    
-    # Toplam süreyi al
     cursor.execute("SELECT toplam_saniye FROM ses_sureleri WHERE user_id = ?", (member.id,))
     toplam = cursor.fetchone()[0]
     conn.close()
-    
-    # Rolleri kontrol et
     await rol_kontrol(member, toplam)
 
 async def rol_kontrol(member, toplam_saniye):
-    """Kullanıcının toplam süresine göre rollerini kontrol eder."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
     for rol_verisi in ROLLER:
         rol_id = rol_verisi["id"]
         gereken_sure = rol_verisi["sure"]
-        
-        # Süre yeterli mi?
         if toplam_saniye >= gereken_sure:
-            # Rol daha önce verildi mi?
             cursor.execute("SELECT 1 FROM verilen_roller WHERE user_id = ? AND rol_id = ?", (member.id, rol_id))
             if not cursor.fetchone():
                 rol = member.guild.get_role(rol_id)
@@ -151,7 +108,6 @@ async def rol_kontrol(member, toplam_saniye):
                         print(f"✅ {member.name} kullanıcısına {rol.name} rolü verildi!")
                     except Exception as e:
                         print(f"❌ Rol verilemedi: {e}")
-    
     conn.close()
 
 @bot.event
@@ -166,7 +122,6 @@ async def on_command_error(ctx, error):
 async def sprofil(ctx, member: discord.Member = None):
     if member is None:
         member = ctx.author
-    
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT toplam_saniye FROM ses_sureleri WHERE user_id = ?", (member.id,))
@@ -176,22 +131,13 @@ async def sprofil(ctx, member: discord.Member = None):
     mesaj_sonuc = cursor.fetchone()
     toplam_mesaj = mesaj_sonuc[0] if mesaj_sonuc else 0
     conn.close()
-    
     saat = toplam_saniye // 3600
     dakika = (toplam_saniye % 3600) // 60
     saniye = toplam_saniye % 60
-    
     embed = discord.Embed(title=f"👤 {member.display_name} Profili", color=discord.Color.blue())
     if member.avatar:
         embed.set_thumbnail(url=member.avatar.url)
-    
-    embed.add_field(
-        name="📊 İstatistikler",
-        value=f"**Toplam Mesaj:** {toplam_mesaj}\n**Ses Süresi:** {saat} saat, {dakika} dakika, {saniye} saniye",
-        inline=False
-    )
-    
-    # Kazanılan roller
+    embed.add_field(name="📊 İstatistikler", value=f"**Toplam Mesaj:** {toplam_mesaj}\n**Ses Süresi:** {saat} saat, {dakika} dakika, {saniye} saniye", inline=False)
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     kazanilanlar = []
@@ -200,18 +146,11 @@ async def sprofil(ctx, member: discord.Member = None):
         if cursor.fetchone():
             kazanilanlar.append(f"✅ {rol_verisi['isim']}")
     conn.close()
-    
     if kazanilanlar:
         embed.add_field(name="🎭 Kazanılan Roller", value="\n".join(kazanilanlar), inline=False)
     else:
         embed.add_field(name="🎭 Kazanılan Roller", value="Henüz hiçbir rol kazanılmamış.", inline=False)
-    
-    embed.add_field(
-        name="📅 Hesap Bilgileri",
-        value=f"**Katılma:** {member.joined_at.strftime('%d/%m/%Y %H:%M') if member.joined_at else 'Bilinmiyor'}\n**Oluşturma:** {member.created_at.strftime('%d/%m/%Y %H:%M')}",
-        inline=False
-    )
-    
+    embed.add_field(name="📅 Hesap Bilgileri", value=f"**Katılma:** {member.joined_at.strftime('%d/%m/%Y %H:%M') if member.joined_at else 'Bilinmiyor'}\n**Oluşturma:** {member.created_at.strftime('%d/%m/%Y %H:%M')}", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
@@ -234,10 +173,6 @@ async def syardım(ctx):
             sure_str = f"{dakika} dakika"
         mesaj += f"- `{rol['isim']}` → {sure_str} ses süresi\n"
     await ctx.send(mesaj)
-
-# ========================================
-# BAŞLATMA
-# ========================================
 
 if __name__ == "__main__":
     Thread(target=run_web).start()
