@@ -1,10 +1,9 @@
 import discord
 from discord.ext import commands
-import asyncio
 import os
-import random
 import time
-from datetime import datetime, timedelta
+import sqlite3
+from datetime import datetime
 from flask import Flask
 from threading import Thread
 
@@ -19,160 +18,205 @@ def run_web():
 
 intents = discord.Intents.all()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!s', intents=intents, help_command=None)
+intents.members = True
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 # ========================================
-# RATE LİMİT KORUMASI
+# VERİTABANI
 # ========================================
 
+DB_NAME = "kullanici_verileri.db"
+
+def veritabani_kur():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ses_sureleri (
+            user_id INTEGER PRIMARY KEY,
+            toplam_saniye INTEGER DEFAULT 0
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mesaj_sayilari (
+            user_id INTEGER PRIMARY KEY,
+            toplam_mesaj INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+veritabani_kur()
+
+# Aktif ses takibi
+aktif_sesler = {}
+
+# Rate limit için
 SON_KONTROL = {}
-
-def rate_limit_kontrol(user_id):
-    now = time.time()
-    if user_id in SON_KONTROL and now - SON_KONTROL[user_id] < 1:
-        return False
-    SON_KONTROL[user_id] = now
-    return True
+MESAJ_CACHE = {}
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(activity=discord.Game(name="!syardım"))
-    print(f'✅ Stat bot hazır: {bot.user}')
+    await bot.change_presence(activity=discord.Game(name="/yardim"))
+    print(f'✅ Bot hazır: {bot.user}')
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ {len(synced)} slash komut senkronize edildi.")
+    except Exception as e:
+        print(f"❌ Sync hatası: {e}")
+
+# ========================================
+# MESAJ VE SES TAKİBİ
+# ========================================
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    if not rate_limit_kontrol(message.author.id):
+    
+    user_id = message.author.id
+    now = time.time()
+    
+    # Rate limit: 1 saniyede 1 işlem
+    if user_id in SON_KONTROL and now - SON_KONTROL[user_id] < 1:
+        await bot.process_commands(message)
         return
+    SON_KONTROL[user_id] = now
+    
+    # Mesaj sayacı (cache'li)
+    if user_id not in MESAJ_CACHE:
+        MESAJ_CACHE[user_id] = 0
+    MESAJ_CACHE[user_id] += 1
+    
+    # Her 10 mesajda bir veritabanına yaz
+    if MESAJ_CACHE[user_id] >= 10:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO mesaj_sayilari (user_id, toplam_mesaj) VALUES (?, 10) ON CONFLICT(user_id) DO UPDATE SET toplam_mesaj = toplam_mesaj + 10", (user_id,))
+        conn.commit()
+        conn.close()
+        MESAJ_CACHE[user_id] = 0
+    
     await bot.process_commands(message)
 
 @bot.event
-async def on_command_error(ctx, error):
-    await ctx.send(f"Hata: {str(error)[:100]}")
+async def on_voice_state_update(member, before, after):
+    now = datetime.now()
+    if before.channel is None and after.channel is not None:
+        aktif_sesler[member.id] = now
+    elif before.channel is not None and after.channel is None:
+        if member.id in aktif_sesler:
+            giris = aktif_sesler.pop(member.id)
+            fark = (now - giris).seconds
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO ses_sureleri (user_id, toplam_saniye) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET toplam_saniye = toplam_saniye + ?", (member.id, fark, fark))
+            conn.commit()
+            conn.close()
+    elif before.channel != after.channel:
+        if member.id in aktif_sesler:
+            giris = aktif_sesler.pop(member.id)
+            fark = (now - giris).seconds
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO ses_sureleri (user_id, toplam_saniye) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET toplam_saniye = toplam_saniye + ?", (member.id, fark, fark))
+            conn.commit()
+            conn.close()
+        if after.channel is not None:
+            aktif_sesler[member.id] = now
 
 # ========================================
-# EĞLENCE KOMUTLARI
+# SLASH KOMUTLAR
 # ========================================
 
-@bot.command()
-async def szar(ctx):
-    """Zar atar (1-6)."""
-    sonuc = random.randint(1, 6)
-    zar_emoji = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
-    await ctx.send(f"Zar: {sonuc} {zar_emoji[sonuc-1]}")
+@bot.tree.command(name="ping", description="Botun gecikmesini gösterir")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms")
 
-@bot.command()
-async def syazitura(ctx):
-    """Yazı tura atar."""
-    sonuc = random.choice(["Yazı", "Tura"])
-    await ctx.send(f"Yazı tura: {sonuc}")
+@bot.tree.command(name="yardim", description="Tüm komutları gösterir")
+async def yardim(interaction: discord.Interaction):
+    mesaj = "**📋 Bot Komutları**\n\n"
+    mesaj += "`/ping` - Gecikme\n"
+    mesaj += "`/yardim` - Bu mesaj\n"
+    mesaj += "`/profil @kisi` - Kullanıcı profilini gösterir\n"
+    await interaction.response.send_message(mesaj)
 
-@bot.command()
-async def srastgele(ctx, min: int = 1, max: int = 100):
-    """Rastgele sayı üretir."""
-    sayi = random.randint(min, max)
-    await ctx.send(f"Rastgele sayı: {sayi}")
-
-@bot.command()
-async def sespri(ctx):
-    """Rastgele espri yapar."""
-    espiriler = [
-        "Bir gün bir bilgisayar virüsü hastaneye gitmiş. Doktor: 'Geçmiş olsun, sende antivirüs var!'",
-        "Neden matematikçiler denizde yüzemez? Çünkü sinüsleri var.",
-        "İki programcı arasında geçen diyalog: 'Neden kodun çalışmıyor?' 'Bilmiyorum, belki de syntax hatası var.'",
-        "Bir inek, bir tavuk ve bir at konuşuyormuş. İnek: 'Ben süt veriyorum.' Tavuk: 'Ben yumurta veriyorum.' At: 'Ben de sosyal medyada harika yorumları alıyorum.'"
-    ]
-    await ctx.send(random.choice(espiriler))
-
-# ========================================
-# BİLGİ KOMUTLARI
-# ========================================
-
-@bot.command()
-async def skullanıcı(ctx, member: discord.Member = None):
-    """Kullanıcı bilgilerini gösterir."""
-    if member is None:
-        member = ctx.author
+@bot.tree.command(name="profil", description="Kullanıcı profilini gösterir (mesaj, ses, roller)")
+async def profil(interaction: discord.Interaction, kisi: discord.Member = None):
+    if kisi is None:
+        kisi = interaction.user
     
-    embed = discord.Embed(title=f"{member.display_name} Bilgileri", color=discord.Color.blue())
-    if member.avatar:
-        embed.set_thumbnail(url=member.avatar.url)
-    embed.add_field(name="Kullanıcı Adı", value=member.name, inline=True)
-    embed.add_field(name="ID", value=member.id, inline=True)
-    embed.add_field(name="Katılma", value=member.joined_at.strftime("%d/%m/%Y %H:%M"), inline=True)
-    embed.add_field(name="Oluşturma", value=member.created_at.strftime("%d/%m/%Y %H:%M"), inline=True)
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def ssunucu(ctx):
-    """Sunucu bilgilerini gösterir."""
-    guild = ctx.guild
-    embed = discord.Embed(title=f"{guild.name} Sunucu Bilgileri", color=discord.Color.blue())
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
-    embed.add_field(name="Sahip", value=guild.owner.mention, inline=True)
-    embed.add_field(name="Üye Sayısı", value=guild.member_count, inline=True)
-    embed.add_field(name="Kanal Sayısı", value=len(guild.channels), inline=True)
-    embed.add_field(name="Rol Sayısı", value=len(guild.roles), inline=True)
-    embed.add_field(name="Oluşturulma", value=guild.created_at.strftime("%d/%m/%Y"), inline=True)
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def srol(ctx, rol: discord.Role):
-    """Rol bilgilerini gösterir."""
-    embed = discord.Embed(title=f"{rol.name} Rol Bilgileri", color=rol.color)
-    embed.add_field(name="ID", value=rol.id, inline=True)
-    embed.add_field(name="Renk", value=str(rol.color), inline=True)
-    embed.add_field(name="Üye Sayısı", value=len(rol.members), inline=True)
-    embed.add_field(name="Oluşturulma", value=rol.created_at.strftime("%d/%m/%Y"), inline=True)
-    await ctx.send(embed=embed)
+    # Veritabanından bilgileri al
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT toplam_saniye FROM ses_sureleri WHERE user_id = ?", (kisi.id,))
+    ses_sonuc = cursor.fetchone()
+    toplam_saniye = ses_sonuc[0] if ses_sonuc else 0
+    
+    cursor.execute("SELECT toplam_mesaj FROM mesaj_sayilari WHERE user_id = ?", (kisi.id,))
+    mesaj_sonuc = cursor.fetchone()
+    toplam_mesaj = mesaj_sonuc[0] if mesaj_sonuc else 0
+    conn.close()
+    
+    # Ses süresini formatla
+    saat = toplam_saniye // 3600
+    dakika = (toplam_saniye % 3600) // 60
+    saniye = toplam_saniye % 60
+    
+    # Embed oluştur
+    embed = discord.Embed(
+        title=f"👤 {kisi.display_name} Profili",
+        color=discord.Color.blue(),
+        timestamp=datetime.now()
+    )
+    
+    if kisi.avatar:
+        embed.set_thumbnail(url=kisi.avatar.url)
+    
+    # Hesap bilgileri
+    embed.add_field(
+        name="📋 Hesap Bilgileri",
+        value=f"**Kullanıcı Adı:** {kisi.name}\n"
+              f"**ID:** {kisi.id}\n"
+              f"**Katılma Tarihi:** {kisi.joined_at.strftime('%d/%m/%Y %H:%M') if kisi.joined_at else 'Bilinmiyor'}",
+        inline=False
+    )
+    
+    # İstatistikler
+    embed.add_field(
+        name="📊 İstatistikler",
+        value=f"**Toplam Mesaj:** {toplam_mesaj}\n"
+              f"**Ses Süresi:** {saat} saat, {dakika} dakika, {saniye} saniye",
+        inline=False
+    )
+    
+    # Roller
+    if kisi.roles:
+        roller = [rol.mention for rol in kisi.roles if rol.name != "@everyone"]
+        if roller:
+            embed.add_field(
+                name="🎭 Roller",
+                value=", ".join(roller),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="🎭 Roller",
+                value="Henüz hiçbir rolü yok.",
+                inline=False
+            )
+    else:
+        embed.add_field(
+            name="🎭 Roller",
+            value="Henüz hiçbir rolü yok.",
+            inline=False
+        )
+    
+    embed.set_footer(text=f"Sorgulayan: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
 
 # ========================================
-# KULLANIŞLI KOMUTLAR
+# BAŞLATMA
 # ========================================
-
-@bot.command()
-async def sping(ctx):
-    """Botun gecikmesini gösterir."""
-    await ctx.send(f"Pong! {round(bot.latency * 1000)}ms")
-
-@bot.command()
-async def sanket(ctx, *, soru: str):
-    """Basit anket oluşturur."""
-    embed = discord.Embed(title="Anket", description=soru, color=discord.Color.blue())
-    embed.set_footer(text=f"{ctx.author.display_name} tarafından başlatıldı.")
-    mesaj = await ctx.send(embed=embed)
-    await mesaj.add_reaction("✅")
-    await mesaj.add_reaction("❌")
-
-@bot.command()
-async def shatırlat(ctx, sure: int, *, mesaj: str):
-    """Belirtilen süre sonra hatırlatma yapar (saniye cinsinden)."""
-    await ctx.send(f"{sure} saniye sonra hatırlatacağım: {mesaj}")
-    await asyncio.sleep(sure)
-    await ctx.send(f"{ctx.author.mention}, hatırlatma: {mesaj}")
-
-@bot.command()
-async def syardım(ctx):
-    """Tüm komutları gösterir."""
-    mesaj = "**Stat Bot Komutları (!s ile)**\n\n"
-    mesaj += "**Eğlence:**\n"
-    mesaj += "!szar - Zar atar\n"
-    mesaj += "!syazitura - Yazı tura atar\n"
-    mesaj += "!srastgele - Rastgele sayı üretir\n"
-    mesaj += "!sespri - Espri yapar\n\n"
-    mesaj += "**Bilgi:**\n"
-    mesaj += "!skullanıcı - Kullanıcı bilgileri\n"
-    mesaj += "!ssunucu - Sunucu bilgileri\n"
-    mesaj += "!srol - Rol bilgileri\n\n"
-    mesaj += "**Kullanışlı:**\n"
-    mesaj += "!sping - Botun gecikmesi\n"
-    mesaj += "!sanket - Anket oluşturur\n"
-    mesaj += "!shatırlat <süre> <mesaj> - Hatırlatıcı\n\n"
-    mesaj += "**Bot:**\n"
-    mesaj += "!syardım - Bu mesajı gösterir"
-    await ctx.send(mesaj)
 
 if __name__ == "__main__":
     Thread(target=run_web).start()
@@ -180,4 +224,4 @@ if __name__ == "__main__":
     if token:
         bot.run(token)
     else:
-        print("Token ayarlanmamış.")
+        print("❌ Token ayarlanmamış")
