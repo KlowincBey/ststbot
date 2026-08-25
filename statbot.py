@@ -50,10 +50,6 @@ veritabani_kur()
 # Aktif ses takibi
 aktif_sesler = {}
 
-# Rate limit için
-SON_KONTROL = {}
-MESAJ_CACHE = {}
-
 @bot.event
 async def on_ready():
     await bot.change_presence(activity=discord.Game(name="/yardim"))
@@ -65,7 +61,7 @@ async def on_ready():
         print(f"❌ Sync hatası: {e}")
 
 # ========================================
-# MESAJ VE SES TAKİBİ
+# MESAJ TAKİBİ (HER MESAJDA KAYDEDER)
 # ========================================
 
 @bot.event
@@ -74,29 +70,19 @@ async def on_message(message):
         return
     
     user_id = message.author.id
-    now = time.time()
     
-    # Rate limit: 1 saniyede 1 işlem
-    if user_id in SON_KONTROL and now - SON_KONTROL[user_id] < 1:
-        await bot.process_commands(message)
-        return
-    SON_KONTROL[user_id] = now
-    
-    # Mesaj sayacı (cache'li)
-    if user_id not in MESAJ_CACHE:
-        MESAJ_CACHE[user_id] = 0
-    MESAJ_CACHE[user_id] += 1
-    
-    # Her 10 mesajda bir veritabanına yaz
-    if MESAJ_CACHE[user_id] >= 10:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO mesaj_sayilari (user_id, toplam_mesaj) VALUES (?, 10) ON CONFLICT(user_id) DO UPDATE SET toplam_mesaj = toplam_mesaj + 10", (user_id,))
-        conn.commit()
-        conn.close()
-        MESAJ_CACHE[user_id] = 0
+    # Her mesajda veritabanına yaz
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO mesaj_sayilari (user_id, toplam_mesaj) VALUES (?, 1) ON CONFLICT(user_id) DO UPDATE SET toplam_mesaj = toplam_mesaj + 1", (user_id,))
+    conn.commit()
+    conn.close()
     
     await bot.process_commands(message)
+
+# ========================================
+# SES TAKİBİ
+# ========================================
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -140,12 +126,11 @@ async def yardim(interaction: discord.Interaction):
     mesaj += "`/profil @kisi` - Kullanıcı profilini gösterir\n"
     await interaction.response.send_message(mesaj)
 
-@bot.tree.command(name="profil", description="Kullanıcı profilini gösterir (mesaj, ses, roller)")
+@bot.tree.command(name="profil", description="Kullanıcı profilini gösterir")
 async def profil(interaction: discord.Interaction, kisi: discord.Member = None):
     if kisi is None:
         kisi = interaction.user
     
-    # Veritabanından bilgileri al
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT toplam_saniye FROM ses_sureleri WHERE user_id = ?", (kisi.id,))
@@ -157,66 +142,40 @@ async def profil(interaction: discord.Interaction, kisi: discord.Member = None):
     toplam_mesaj = mesaj_sonuc[0] if mesaj_sonuc else 0
     conn.close()
     
-    # Ses süresini formatla
     saat = toplam_saniye // 3600
     dakika = (toplam_saniye % 3600) // 60
     saniye = toplam_saniye % 60
     
-    # Embed oluştur
     embed = discord.Embed(
         title=f"👤 {kisi.display_name} Profili",
         color=discord.Color.blue(),
         timestamp=datetime.now()
     )
-    
     if kisi.avatar:
         embed.set_thumbnail(url=kisi.avatar.url)
     
-    # Hesap bilgileri
     embed.add_field(
         name="📋 Hesap Bilgileri",
-        value=f"**Kullanıcı Adı:** {kisi.name}\n"
-              f"**ID:** {kisi.id}\n"
-              f"**Katılma Tarihi:** {kisi.joined_at.strftime('%d/%m/%Y %H:%M') if kisi.joined_at else 'Bilinmiyor'}",
+        value=f"**Kullanıcı Adı:** {kisi.name}\n**ID:** {kisi.id}\n**Katılma:** {kisi.joined_at.strftime('%d/%m/%Y %H:%M') if kisi.joined_at else 'Bilinmiyor'}",
         inline=False
     )
     
-    # İstatistikler
     embed.add_field(
         name="📊 İstatistikler",
-        value=f"**Toplam Mesaj:** {toplam_mesaj}\n"
-              f"**Ses Süresi:** {saat} saat, {dakika} dakika, {saniye} saniye",
+        value=f"**Toplam Mesaj:** {toplam_mesaj}\n**Ses Süresi:** {saat} saat, {dakika} dakika, {saniye} saniye",
         inline=False
     )
     
-    # Roller
     if kisi.roles:
         roller = [rol.mention for rol in kisi.roles if rol.name != "@everyone"]
-        if roller:
-            embed.add_field(
-                name="🎭 Roller",
-                value=", ".join(roller),
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="🎭 Roller",
-                value="Henüz hiçbir rolü yok.",
-                inline=False
-            )
-    else:
         embed.add_field(
             name="🎭 Roller",
-            value="Henüz hiçbir rolü yok.",
+            value=", ".join(roller) if roller else "Henüz rolü yok.",
             inline=False
         )
     
     embed.set_footer(text=f"Sorgulayan: {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
-
-# ========================================
-# BAŞLATMA
-# ========================================
 
 if __name__ == "__main__":
     Thread(target=run_web).start()
